@@ -117,14 +117,25 @@ class GenericRelationshipProperty(MapperProperty):
     def type2discriminator(self, type):
         if self._map_type2discriminator:
             return self._map_type2discriminator[type]
-        else:
-            return type
+        return None
 
     def discriminator2type(self, discriminator):
         if self._map_discriminator2type:
             return self._map_discriminator2type[discriminator]
-        else:
-            return discriminator
+        return None
+
+    def discriminator_to_model(self, discriminator):
+        if self._map_discriminator2type:
+            _type = self._map_discriminator2type[discriminator]
+            return self.class_._decl_class_registry[_type]
+        return None
+
+    def discriminator_model_pairs(self):
+        return [
+            (discriminator, self.parent.class_._decl_class_registry[_type])
+            for discriminator, _type
+            in self._map_discriminator2type.items()
+        ]
 
     def _column_to_property(self, column):
         if isinstance(column, hybrid_property):
