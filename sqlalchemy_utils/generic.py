@@ -1,4 +1,5 @@
 from collections import Iterable
+import itertools
 
 import six
 import sqlalchemy as sa
@@ -45,7 +46,7 @@ class GenericAttributeImpl(attributes.ScalarAttributeImpl):
             discriminator = getattr(state.obj(), discriminator.__name__)
         else:
             discriminator = state.attrs[discriminator.key].value
-        return self.parent_token.discriminator2type(discriminator)
+        return self.parent_token.get_related_model_name(discriminator)
 
     def get_state_id(self, state):
         # Lookup row with the discriminator and id.
@@ -74,68 +75,76 @@ class GenericAttributeImpl(attributes.ScalarAttributeImpl):
 
             # Set the identifier and the discriminator.
             class_name = six.text_type(class_.__name__)
-            discriminator = self.parent_token.type2discriminator(class_name)
+            discriminators = self.parent_token.get_related_model_discriminators(class_name)
             for index, id in enumerate(self.parent_token.id):
                 dict_[id.key] = pk[index]
-            dict_[self.parent_token.discriminator.key] = discriminator
+            # TODO: Add checking logic here to make sure we're adding something
+            #       that's actually supported by _discriminator_map
+            dict_[self.parent_token.discriminator.key] = discriminators[0]
 
 
 class GenericRelationshipProperty(MapperProperty):
     """A generic form of the relationship property.
 
     Creates a 1 to many relationship between the parent model
-    and any other models using a descriminator (the model name).
+    and any other models using a discriminator. By default this
+    is the model name, but this can be overridden.
 
     :param discriminator
         Field to discriminate which model we are referring to.
     :param id:
         Field to point to the model we are referring to.
-    :param map_type2discriminator:
-        Mapping between the model class name and the discriminator stored.
+    :param discriminator_map:
+        A dictionary relating discriminator values(the keys) to
+        the model class name it's associated with.
     """
 
-    def __init__(self, discriminator, id, doc=None,
-                 map_type2discriminator=None):
+    def __init__(self, discriminator, id, doc=None, discriminator_map=None):
         super(GenericRelationshipProperty, self).__init__()
         self._discriminator_col = discriminator
         self._id_cols = id
         self._id = None
         self._discriminator = None
-        if map_type2discriminator is None:
-            self._map_type2discriminator = None
-            self._map_discriminator2type = None
-        else:
-            self._map_type2discriminator = map_type2discriminator
-            self._map_discriminator2type = {
-                v: k for k, v in map_type2discriminator.items()
-            }
+        self._discriminator_map = {}
+        if discriminator_map:
+            self._discriminator_map = discriminator_map
 
         self.doc = doc
 
         set_creation_order(self)
 
-    def type2discriminator(self, type):
-        if self._map_type2discriminator:
-            return self._map_type2discriminator[type]
-        return None
+    def get_related_model(self, discriminator):
+        model_name = self.get_related_model_name(discriminator)
+        return self.parent.class_._decl_class_registry[model_name]
 
-    def discriminator2type(self, discriminator):
-        if self._map_discriminator2type:
-            return self._map_discriminator2type[discriminator]
-        return None
+    def get_all_related_models(self):
+        return set([
+            self.get_related_model(discriminator)
+            for discriminator in self._discriminator_map.keys()
+        ])
 
-    def discriminator_to_model(self, discriminator):
-        if self._map_discriminator2type:
-            _type = self._map_discriminator2type[discriminator]
-            return self.class_._decl_class_registry[_type]
-        return None
+    def get_related_model_name(self, discriminator):
+        if not self._discriminator_map:
+            return discriminator
+        return self._discriminator_map[discriminator]
 
-    def discriminator_model_pairs(self):
+    def get_all_related_model_names(self):
+        return set([
+            model_name
+            for model_name in self._discriminator_map.values()
+        ])
+
+    def get_related_model_discriminators(self, model_name):
+        if not self._discriminator_map:
+            return [model_name]
         return [
-            (discriminator, self.parent.class_._decl_class_registry[_type])
-            for discriminator, _type
-            in self._map_discriminator2type.items()
+            discriminator
+            for discriminator, other_model_name in self._discriminator_map.items()
+            if model_name == other_model_name
         ]
+
+    def get_all_related_model_discriminators(self):
+        return self._discriminator_map.keys()
 
     def _column_to_property(self, column):
         if isinstance(column, hybrid_property):
@@ -179,9 +188,9 @@ class GenericRelationshipProperty(MapperProperty):
 
         def __eq__(self, other):
             class_name = six.text_type(type(other).__name__)
-            discriminator = self.property.type2discriminator(class_name)
+            discriminators = self.get_related_model_discriminators(class_name)
 
-            q = self.property._discriminator_col == discriminator
+            q = self.property._discriminator_col.in_(discriminators)
             other_id = identity(other)
             for index, id in enumerate(self.property._id_cols):
                 q &= id == other_id[index]
@@ -200,9 +209,13 @@ class GenericRelationshipProperty(MapperProperty):
                 six.text_type(submapper.class_.__name__)
                 for submapper in mapper._inheriting_mappers
             ])
-            discriminators = [self.property.type2discriminator(cn)
-                              for cn in class_names
-                              ]
+
+            discriminators_list = [
+                self.get_related_model_discriminators(class_name)
+                for class_name in class_names
+            ]
+            discriminators = list(itertools.chain(*discriminators_list))
+
             return self.property._discriminator_col.in_(discriminators)
 
     def instrument_class(self, mapper):
